@@ -1,0 +1,1142 @@
+#define _CRT_SECURE_NO_WARNINGS
+
+#define TO_RADIAN 0.01745329252f  
+#define TO_DEGREE 57.295779513f
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <GL/glew.h>
+#include <GL/freeglut.h>
+#include <FreeImage/FreeImage.h>
+
+
+#include "Shaders/LoadShaders.h"
+GLuint h_ShaderProgram; // handle to shader program
+GLint loc_ModelViewProjectionMatrix, loc_primitive_color; // indices of uniform variables
+
+// #include glm/*.hpp only if necessary
+// #include <glm/glm.hpp> 
+#include <glm/gtc/matrix_transform.hpp> //translate, rotate, scale, lookAt, perspective, etc.
+#include <glm/gtc/matrix_inverse.hpp> //inverse, affineInverse, etc.
+glm::mat4 ModelViewProjectionMatrix;
+glm::mat4 ViewProjectionMatrix, ViewMatrix, ProjectionMatrix;
+
+glm::mat4 ModelMatrix_CAR_BODY, ModelMatrix_CAR_WHEEL, ModelMatrix_CAR_NUT, ModelMatrix_CAR_DRIVER, ModelMatrix_TEAPOT, ModelMatrix_BOX;
+glm::mat4 ModelMatrix_CAR_BODY_to_DRIVER; // computed only once in initialize_camera()
+
+glm::mat4 ModelMatrix_TIGER;
+glm::mat4 ModelMatrix_TIGER_to_EYE;
+
+bool teapot_flag = 0;
+bool box_flag = 0;
+bool tigermoving_flag = 0;
+bool rotation_spider_flag = 0;
+bool zoom_flag = 0;
+bool car_z_flag = 0;
+
+int window_width = 1200;
+int window_height = 800;
+
+#include "Camera.h"
+#include "Geometry.h"
+
+int cur_frame_spider = 0;
+int cur_frame_tiger = 0;
+int cur_cam_pos = 0;
+int cur_cam_height = 0;
+
+float car_x=0;
+float car_y=0;
+float car_z=0;
+float car_rotation = 0;
+float car_twist = 0.0f;
+
+float rotation_angle_car = 0.0f;
+float rotation_angle_teapot = 0.0f;
+float rotation_angle_box = 0.0f;
+float rotation_angle_spider = 0.0f;
+
+float tigermoving_speed = 0.3f;
+float tigermoving_height = 0.001f;
+float tigermoving_coord = -40.0f;
+
+float scale_spider = 1.0f;
+
+float scale_dragon = 1.0f;
+
+float cow_gradation = 0.100f;
+
+//-----------------------------------
+
+//-----------------------------------------
+
+#define rad 1.7f
+#define ww 1.0f
+#define N_SPIDER_FRAMES 16
+#define CAM_ROTATE 30.0f
+#define CAM_DISTANCE 75.0f
+#define CAR_ROUTE_RADIUS 50.0f
+#define CAR_TWIST_SPEED 0.2f;
+
+GLuint spider_VBO, spider_VAO;
+int spider_n_triangles[N_SPIDER_FRAMES];
+int spider_vertex_offset[N_SPIDER_FRAMES];
+GLfloat *spider_vertices[N_SPIDER_FRAMES];
+
+int read_geometry(GLfloat **object, int bytes_per_primitive, char *filename)
+{
+	int n_triangles;
+	FILE *fp;
+
+	fp = fopen(filename, "rb");
+	if (fp == NULL)
+	{
+		fprintf(stderr, "Cannot open the object file %s...", filename);
+		return -1;
+	}
+	fread(&n_triangles, sizeof(int), 1, fp);
+	*object = (float*)malloc(n_triangles*bytes_per_primitive);
+	if (*object == NULL)
+	{
+		fprintf(stderr, "Cannot allocate memory for the geometry file %s...", filename);
+		return -1;
+	}
+	fread(*object, bytes_per_primitive, n_triangles, fp);
+	fclose(fp);
+
+	return n_triangles;
+}
+
+void prepare_spider(void) {
+	int i, n_bytes_per_vertex, n_bytes_per_triangle, spider_n_total_triangles = 0;
+	char filename[512];
+
+	n_bytes_per_vertex = 8 * sizeof(float); // 3 for vertex, 3 for normal, and 2 for texcoord
+	n_bytes_per_triangle = 3 * n_bytes_per_vertex;
+
+	for (i = 0; i < N_SPIDER_FRAMES; i++) {
+		sprintf(filename, "Data/spider_vnt_%d%d.geom", i / 10, i % 10);
+		spider_n_triangles[i] = read_geometry(&spider_vertices[i], n_bytes_per_triangle, filename);
+		// Assume all geometry files are effective.
+		spider_n_total_triangles += spider_n_triangles[i];
+
+		if (i == 0)
+			spider_vertex_offset[i] = 0;
+		else
+			spider_vertex_offset[i] = spider_vertex_offset[i - 1] + 3 * spider_n_triangles[i - 1];
+	}
+
+	// Initialize vertex buffer object.
+	glGenBuffers(1, &spider_VBO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, spider_VBO);
+	glBufferData(GL_ARRAY_BUFFER, spider_n_total_triangles*n_bytes_per_triangle, NULL, GL_STATIC_DRAW);
+
+	for (i = 0; i < N_SPIDER_FRAMES; i++)
+		glBufferSubData(GL_ARRAY_BUFFER, spider_vertex_offset[i] * n_bytes_per_vertex,
+			spider_n_triangles[i] * n_bytes_per_triangle, spider_vertices[i]);
+
+	// As the geometry data exists now in graphics memory, ...
+	for (i = 0; i < N_SPIDER_FRAMES; i++)
+		free(spider_vertices[i]);
+
+	// Initialize vertex array object.
+	glGenVertexArrays(1, &spider_VAO);
+	glBindVertexArray(spider_VAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, spider_VBO);
+	glVertexAttribPointer(LOC_VERTEX, 3, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(0));
+
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+void draw_spider(void) {
+	glFrontFace(GL_CCW);
+
+	glUniform3f(loc_primitive_color, 1.0f, 1.0f, 0.0f); // Spider wireframe color = yellow
+	glBindVertexArray(spider_VAO);
+	glDrawArrays(GL_TRIANGLES, spider_vertex_offset[cur_frame_spider], 3 * spider_n_triangles[cur_frame_spider]);
+	glBindVertexArray(0);
+}
+
+/// -------------------------------------------------------
+
+// dragon object
+GLuint dragon_VBO, dragon_VAO;
+int dragon_n_triangles;
+GLfloat* dragon_vertices;
+
+void prepare_dragon(void) {
+	int i, n_bytes_per_vertex, n_bytes_per_triangle, dragon_n_total_triangles = 0;
+	char filename[512];
+
+	n_bytes_per_vertex = 8 * sizeof(float); // 3 for vertex, 3 for normal, and 2 for texcoord
+	n_bytes_per_triangle = 3 * n_bytes_per_vertex;
+
+	sprintf(filename, "Data/static_objects/dragon_vnt.geom");
+	dragon_n_triangles = read_geometry(&dragon_vertices, n_bytes_per_triangle, filename);
+	// assume all geometry files are effective
+	dragon_n_total_triangles += dragon_n_triangles;
+
+
+	// initialize vertex buffer object
+	glGenBuffers(1, &dragon_VBO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, dragon_VBO);
+	glBufferData(GL_ARRAY_BUFFER, dragon_n_total_triangles * 3 * n_bytes_per_vertex, dragon_vertices, GL_STATIC_DRAW);
+
+	// as the geometry data exists now in graphics memory, ...
+	free(dragon_vertices);
+
+	// initialize vertex array object
+	glGenVertexArrays(1, &dragon_VAO);
+	glBindVertexArray(dragon_VAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, dragon_VBO);
+	glVertexAttribPointer(LOC_VERTEX, 3, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(0));
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(LOC_NORMAL, 3, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(3 * sizeof(float)));
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(LOC_TEXCOORD, 2, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(6 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+
+	
+
+	
+}
+
+// ironman object
+GLuint ironman_VBO, ironman_VAO;
+int ironman_n_triangles;
+GLfloat* ironman_vertices;
+
+void prepare_ironman(void) {
+	int i, n_bytes_per_vertex, n_bytes_per_triangle, ironman_n_total_triangles = 0;
+	char filename[512];
+
+	n_bytes_per_vertex = 8 * sizeof(float); // 3 for vertex, 3 for normal, and 2 for texcoord
+	n_bytes_per_triangle = 3 * n_bytes_per_vertex;
+
+	sprintf(filename, "Data/static_objects/ironman_vnt.geom");
+	ironman_n_triangles = read_geometry(&ironman_vertices, n_bytes_per_triangle, filename);
+	// assume all geometry files are effective
+	ironman_n_total_triangles += ironman_n_triangles;
+
+
+	// initialize vertex buffer object
+	glGenBuffers(1, &ironman_VBO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, ironman_VBO);
+	glBufferData(GL_ARRAY_BUFFER, ironman_n_total_triangles * 3 * n_bytes_per_vertex, ironman_vertices, GL_STATIC_DRAW);
+
+	// as the geometry data exists now in graphics memory, ...
+	free(ironman_vertices);
+
+	// initialize vertex array object
+	glGenVertexArrays(1, &ironman_VAO);
+	glBindVertexArray(ironman_VAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, ironman_VBO);
+	glVertexAttribPointer(LOC_VERTEX, 3, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(0));
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(LOC_NORMAL, 3, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(3 * sizeof(float)));
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(LOC_TEXCOORD, 2, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(6 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+
+}
+
+/// -------------------------------------------------------------
+
+
+
+#define N_TIGER_FRAMES 12
+
+GLuint tiger_VBO, tiger_VAO;
+int tiger_n_triangles[N_TIGER_FRAMES];
+int tiger_vertex_offset[N_TIGER_FRAMES];
+GLfloat *tiger_vertices[N_TIGER_FRAMES];
+
+void prepare_tiger(void) {
+	int i, n_bytes_per_vertex, n_bytes_per_triangle, tiger_n_total_triangles = 0;
+	char filename[512];
+
+	n_bytes_per_vertex = 8 * sizeof(float); // 3 for vertex, 3 for normal, and 2 for texcoord
+	n_bytes_per_triangle = 3 * n_bytes_per_vertex;
+
+	for (i = 0; i < N_TIGER_FRAMES; i++) {
+		sprintf(filename, "Data/Tiger_%d%d_triangles_vnt.geom", i / 10, i % 10);
+		tiger_n_triangles[i] = read_geometry(&tiger_vertices[i], n_bytes_per_triangle, filename);
+		// Assume all geometry files are effective.
+		tiger_n_total_triangles += tiger_n_triangles[i];
+
+		if (i == 0)
+			tiger_vertex_offset[i] = 0;
+		else
+			tiger_vertex_offset[i] = tiger_vertex_offset[i - 1] + 3 * tiger_n_triangles[i - 1];
+	}
+
+	// Initialize vertex buffer object.
+	glGenBuffers(1, &tiger_VBO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, tiger_VBO);
+	glBufferData(GL_ARRAY_BUFFER, tiger_n_total_triangles*n_bytes_per_triangle, NULL, GL_STATIC_DRAW);
+
+	for (i = 0; i < N_TIGER_FRAMES; i++)
+		glBufferSubData(GL_ARRAY_BUFFER, tiger_vertex_offset[i] * n_bytes_per_vertex,
+			tiger_n_triangles[i] * n_bytes_per_triangle, tiger_vertices[i]);
+
+	// As the geometry data exists now in graphics memory, ...
+	for (i = 0; i < N_TIGER_FRAMES; i++)
+		free(tiger_vertices[i]);
+
+	// Initialize vertex array object.
+	glGenVertexArrays(1, &tiger_VAO);
+	glBindVertexArray(tiger_VAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, tiger_VBO);
+	glVertexAttribPointer(LOC_VERTEX, 3, GL_FLOAT, GL_FALSE, n_bytes_per_vertex, BUFFER_OFFSET(0));
+
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+void draw_tiger(void) {
+	glFrontFace(GL_CCW);
+
+	glUniform3f(loc_primitive_color, 0.0f, 1.0f, 0.75f); // Tiger wireframe color = yellowgreen
+	glBindVertexArray(tiger_VAO);
+	glDrawArrays(GL_TRIANGLES, tiger_vertex_offset[cur_frame_tiger], 3 * tiger_n_triangles[cur_frame_tiger]);
+	glBindVertexArray(0);
+}
+
+void draw_wheel_and_nut() {
+	// angle is used in Hierarchical_Car_Correct later
+	int i;
+
+	glUniform3f(loc_primitive_color, 0.000f, 0.808f, 0.820f); // color name: DarkTurquoise
+	draw_geom_obj(GEOM_OBJ_ID_CAR_WHEEL); // draw wheel
+
+	for (i = 0; i < 5; i++) {
+		ModelMatrix_CAR_NUT = glm::rotate(ModelMatrix_CAR_WHEEL, TO_RADIAN*72.0f*i, glm::vec3(0.0f, 0.0f, 1.0f));
+		ModelMatrix_CAR_NUT = glm::translate(ModelMatrix_CAR_NUT, glm::vec3(rad - 0.5f, 0.0f, ww));
+		ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_NUT;
+		glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+
+		glUniform3f(loc_primitive_color, 0.690f, 0.769f, 0.871f); // color name: LightSteelBlue
+		draw_geom_obj(GEOM_OBJ_ID_CAR_NUT); // draw i-th nut
+	}
+}
+//additional object drawers
+
+//-----------------------------------------
+void draw_dragon(void) {
+	glFrontFace(GL_CW);
+
+	glBindVertexArray(dragon_VAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3 * dragon_n_triangles);
+	glBindVertexArray(0);
+}
+
+void draw_ironman(void) {
+	glFrontFace(GL_CW);
+
+	glBindVertexArray(ironman_VAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3 * ironman_n_triangles);
+	glBindVertexArray(0);
+}
+
+//-------------------------------------------
+void draw_cow(int flag)
+{
+	
+	if (flag == 1)
+	{
+		cow_gradation = cow_gradation + 0.005f;
+		if (cow_gradation > 1.0f)
+		{
+			cow_gradation = 0.100f;
+		}
+		glUniform3f(loc_primitive_color, 0.705f, cow_gradation, 0.314f);
+	}
+	else if (flag == 2)
+	{
+		glUniform3f(loc_primitive_color, 0.305f, 0.300f, cow_gradation);
+	}
+	else if (flag == 3)
+	{
+		glUniform3f(loc_primitive_color, cow_gradation, 0.300f, 0.300f);
+	}
+	else
+	{
+		glUniform3f(loc_primitive_color, 0.705f, 0.118f, 0.314f); //some red color
+	}
+	draw_geom_obj(GEOM_OBJ_ID_COW);
+	glLineWidth(1.5f);
+	draw_axes();
+
+}
+
+void draw_tigermoving(void)
+{
+
+	glUniform3f(loc_primitive_color, 0.705f, 0.118f, 0.314f); //some red color
+
+	draw_geom_obj(GEOM_OBJ_ID_COW);
+	glLineWidth(2.0f);
+	draw_axes();
+
+}
+
+void draw_teapot(void)
+{
+	glUniform3f(loc_primitive_color, 0.57f, 0.139f, 0.705);
+	if (teapot_flag)
+	{
+		glUniform3f(loc_primitive_color, 0.60f, 0.75f, 0.13f);
+	}
+	draw_geom_obj(GEOM_OBJ_ID_TEAPOT);
+	glLineWidth(0.5f);
+	draw_axes();
+
+}
+
+void draw_box(void)
+{
+	glUniform3f(loc_primitive_color, 0.3f, 0.35f, 1.0f);
+	if (box_flag)
+	{
+		glUniform3f(loc_primitive_color, 0.60f, 0.75f, 0.13f);
+	}
+	draw_geom_obj(GEOM_OBJ_ID_BOX);
+	glLineWidth(1.2f);
+	draw_axes();
+
+}
+
+
+
+
+
+//additional object drawers
+
+//additional object manipulation
+void switch_teapot()
+{
+	if (!teapot_flag)
+	{
+		teapot_flag = 1;
+	}
+	else
+	{
+		teapot_flag = 0;
+	}
+}
+
+void switch_box()
+{
+	if (!box_flag)
+	{
+		box_flag = 1;
+	}
+	else
+	{
+		box_flag = 0;
+	}
+}
+
+void switch_tigermoving()
+{
+	if (!tigermoving_flag)
+	{
+		tigermoving_flag = 1;
+	}
+	else
+	{
+		tigermoving_flag = 0;
+		tigermoving_coord = -40.0f;
+		tigermoving_height = 0.001f;
+		tigermoving_speed = 0.5f;
+	}
+}
+//switching movement
+
+void rotate_teapot()
+{
+	rotation_angle_teapot = rotation_angle_teapot + 1;
+}
+
+void pendulum_box()
+{
+	rotation_angle_box = rotation_angle_box + 0.15;
+}
+
+void rotate_spider()
+{
+	if (rotation_angle_spider > 360.0f*TO_RADIAN)
+	{
+		rotation_spider_flag = 0;
+		scale_spider = -1;
+	}
+	else if(rotation_angle_spider < 0.0f)
+	{
+		rotation_spider_flag = 1;
+		scale_spider = 1;
+	}
+	if (rotation_spider_flag)
+	{
+		rotation_angle_spider = rotation_angle_spider + 0.01f;
+	}
+	else
+	{
+		rotation_angle_spider = rotation_angle_spider - 0.01f;
+	}
+	
+}
+
+void jump_tigermoving()
+{
+	if (tigermoving_height < 0.0f)
+	{
+		tigermoving_speed = -1 * tigermoving_speed;
+		tigermoving_height = 0.001f;
+		return;
+	}
+	tigermoving_speed = tigermoving_speed - 0.01f;
+	tigermoving_coord = tigermoving_coord + 0.05f;
+	tigermoving_height = tigermoving_height + tigermoving_speed;
+}
+
+//additional object manipulation
+
+void move_car()
+{
+	car_rotation = car_rotation + 0.2f;
+	if (car_rotation > 360.0f)
+	{
+		car_rotation = 0.0f;
+	}
+	car_x = CAR_ROUTE_RADIUS * -sin(car_rotation*TO_RADIAN);
+	car_y = (CAR_ROUTE_RADIUS * -cos(car_rotation*TO_RADIAN)) + CAR_ROUTE_RADIUS;
+	if (car_twist > 45.0f)
+	{
+		car_z_flag = 0;
+	}
+	else if (car_twist < -45.0f)
+	{
+		car_z_flag = 1;
+	}
+	if (car_z_flag)
+	{
+		car_twist += 0.4f;
+		car_z = car_z + sin(car_twist*TO_RADIAN);
+	}
+	else
+	{
+		car_twist -= 0.4f;
+		car_z = car_z + sin(car_twist*TO_RADIAN);
+	}
+}
+
+void draw_car_dummy(void) {
+	glUniform3f(loc_primitive_color, 0.498f, 1.000f, 0.831f); // color name: Aquamarine
+	draw_geom_obj(GEOM_OBJ_ID_CAR_BODY); // draw body
+
+	glLineWidth(2.0f);
+	draw_axes(); // draw MC axes of body
+	glLineWidth(1.0f);
+
+	ModelMatrix_CAR_DRIVER = glm::translate(ModelMatrix_CAR_BODY, glm::vec3(-3.0f, 0.5f, 2.5f));
+	ModelMatrix_CAR_DRIVER = glm::rotate(ModelMatrix_CAR_DRIVER, TO_RADIAN*90.0f, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_DRIVER;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	glLineWidth(5.0f);
+	draw_axes(); // draw camera frame at driver seat
+	glLineWidth(1.0f);
+
+	ModelMatrix_CAR_WHEEL = glm::translate(ModelMatrix_CAR_BODY, glm::vec3(-3.9f, -3.5f, 4.5f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_twist* TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_rotation * CAR_ROUTE_RADIUS / 3.4f * TO_RADIAN ,glm::vec3(0.0f, 0.0f, 1.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_WHEEL;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_wheel_and_nut();  // draw wheel 0
+
+	ModelMatrix_CAR_WHEEL = glm::translate(ModelMatrix_CAR_BODY, glm::vec3(3.9f, -3.5f, 4.5f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_twist* TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_rotation * CAR_ROUTE_RADIUS / 3.4f * TO_RADIAN, glm::vec3(0.0f, 0.0f, 1.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_WHEEL;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_wheel_and_nut();  // draw wheel 1
+
+	ModelMatrix_CAR_WHEEL = glm::translate(ModelMatrix_CAR_BODY, glm::vec3(-3.9f, -3.5f, -4.5f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_twist* TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_rotation * CAR_ROUTE_RADIUS / 3.4f * TO_RADIAN, glm::vec3(0.0f, 0.0f, 1.0f));
+	ModelMatrix_CAR_WHEEL = glm::scale(ModelMatrix_CAR_WHEEL, glm::vec3(1.0f, 1.0f, -1.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_WHEEL;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_wheel_and_nut();  // draw wheel 2
+
+	ModelMatrix_CAR_WHEEL = glm::translate(ModelMatrix_CAR_BODY, glm::vec3(3.9f, -3.5f, -4.5f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_twist* TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_CAR_WHEEL = glm::rotate(ModelMatrix_CAR_WHEEL, car_rotation * CAR_ROUTE_RADIUS / 3.4f * TO_RADIAN, glm::vec3(0.0f, 0.0f, 1.0f));
+	ModelMatrix_CAR_WHEEL = glm::scale(ModelMatrix_CAR_WHEEL, glm::vec3(1.0f, 1.0f, -1.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_WHEEL;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_wheel_and_nut();  // draw wheel 3
+}
+
+/*********************************  START: callbacks *********************************/
+int flag_draw_world_objects = 1;
+
+void draw_objects_in_world(void) {
+	glm::mat4 ModelMatrix_big_cow, ModelMatrix_small_cow;
+	glm::mat4 ModelMatrix_big_box, ModelMatrix_small_box;
+	glm::mat4 ModelMatrix_spider, ModelMatrix_web;
+	glm::mat4 ModelMatrix_dragon;
+	glm::mat4 ModelMatrix_ironman;
+
+
+	GLfloat web_scale = 1;
+	int i = 0;
+	
+	rotate_spider();
+	move_car();
+
+	
+
+	ModelMatrix_spider = glm::translate(glm::mat4(1.0f), glm::vec3(WEB_START*(-1.55f), 0.0f, 0.0f));
+	ModelMatrix_spider = glm::rotate(ModelMatrix_spider, -90.0f*TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_spider = glm::rotate(ModelMatrix_spider, -rotation_angle_spider, glm::vec3(0.0f, 0.0f, 1.0f));
+	ModelMatrix_spider = glm::translate(ModelMatrix_spider, glm::vec3(20.0f, 0.0f, 10.0f));
+	ModelMatrix_spider = glm::scale(ModelMatrix_spider, glm::vec3(2.5f, scale_spider * -2.5f, 2.5f));
+	ModelMatrix_spider = glm::rotate(ModelMatrix_spider, -90.0f*TO_RADIAN, glm::vec3(1.0f, 0.0f, 0.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_spider;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_spider();
+
+	//------------------------------
+
+	ModelMatrix_dragon = glm::translate(ModelMatrix_dragon, glm::vec3(20.0f, -10.0f, 10.0f));
+	ModelMatrix_dragon = glm::scale(ModelMatrix_dragon, glm::vec3(-0.5f, scale_dragon * -0.5f, -0.5f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_dragon;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_dragon();
+
+	ModelMatrix_ironman = glm::translate(ModelMatrix_ironman, glm::vec3(-10.0f, -10.0f, 10.0f));
+	ModelMatrix_ironman = glm::scale(ModelMatrix_ironman, glm::vec3(-2.0f, scale_dragon * 2.5f, -0.5f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_ironman;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_ironman();
+
+	
+	//draw extra objects
+	for (i = 1; i < 2; ++i)
+	{
+		ModelMatrix_big_cow = glm::rotate(glm::mat4(1.0f), -45.0f*TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+		ModelMatrix_big_cow = glm::translate(ModelMatrix_big_cow, glm::vec3(20.0f - (i*10.0f), 10.0f, -10.0f));
+		ModelMatrix_big_cow = glm::scale(ModelMatrix_big_cow, glm::vec3(2.0f*i, 2.0f*i, 2.0f*i));
+		ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_big_cow;
+		glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+		draw_cow(i);
+		//draw small cow
+	}
+
+	if (tigermoving_flag)
+	{
+		jump_tigermoving();
+	}
+	ModelMatrix_TIGER = glm::translate(glm::mat4(1.0f), glm::vec3(-20.0f, tigermoving_height, -60.0f));
+	ModelMatrix_TIGER = glm::scale(ModelMatrix_TIGER, glm::vec3(0.1f, 0.1f, 0.1f));
+	ModelMatrix_TIGER = glm::rotate(ModelMatrix_TIGER, 90.0f*TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_TIGER = glm::rotate(ModelMatrix_TIGER, -90.0f*TO_RADIAN, glm::vec3(1.0f, 0.0f, 0.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_TIGER;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_tiger();
+
+	if (teapot_flag)
+	{
+		rotate_teapot();
+	}
+	ModelMatrix_TEAPOT = glm::rotate(glm::mat4(1.0f), -rotation_angle_teapot * TO_RADIAN, glm::vec3(0.0f, 1.0f, 1.0f));
+	ModelMatrix_TEAPOT = glm::translate(ModelMatrix_TEAPOT, glm::vec3(-20.0f, 1.0f, 10.0f));
+	ModelMatrix_TEAPOT = glm::scale(ModelMatrix_TEAPOT, glm::vec3(1.5f, 2.0f, 1.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_TEAPOT;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_teapot();
+
+	if (box_flag)
+	{
+		pendulum_box();
+	}
+	ModelMatrix_BOX = glm::rotate(glm::mat4(1.0f), 0.0f, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelMatrix_BOX = glm::translate(ModelMatrix_BOX, glm::vec3(10 * sin(rotation_angle_box), 1.0f, -20.0f));
+	ModelMatrix_BOX = glm::scale(ModelMatrix_BOX, glm::vec3(3.0f, 3.0f, 3.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_BOX;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_box();
+	//draw extra objects
+
+	//if (camera_type == CAMERA_DRIVER) set_ViewMatrix_for_driver();
+
+	ModelMatrix_CAR_BODY = glm::translate(glm::mat4(1.0f), glm::vec3(car_x, car_y, car_z-20.0f));
+	ModelMatrix_CAR_BODY = glm::rotate(ModelMatrix_CAR_BODY, -car_rotation*TO_RADIAN, glm::vec3(0.0f, 0.0f, 1.0f));
+	ModelMatrix_CAR_BODY = glm::rotate(ModelMatrix_CAR_BODY, car_twist * TO_RADIAN, glm::vec3(0.0f, 1.0f, 0.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_CAR_BODY;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_car_dummy();
+
+	ModelViewProjectionMatrix = glm::scale(ViewProjectionMatrix, glm::vec3(5.0f, 5.0f, 5.0f));
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	glLineWidth(2.0f);
+	draw_axes();
+	glLineWidth(1.0f);
+
+	ModelViewProjectionMatrix = ViewProjectionMatrix;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_path();
+
+	
+
+	ModelMatrix_web = glm::scale(glm::mat4(1.0f), glm::vec3(-1.0f, 1.0f, 1.0f));
+	ModelViewProjectionMatrix = ViewProjectionMatrix * ModelMatrix_web;
+	glUniformMatrix4fv(loc_ModelViewProjectionMatrix, 1, GL_FALSE, &ModelViewProjectionMatrix[0][0]);
+	draw_web();
+}
+
+void display(void) {
+	
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	if (camera_type == CAMERA_DRIVER)
+	{
+		glViewport(0, 0, window_width, window_height);
+		set_ViewMatrix_for_driver();
+		draw_objects_in_world();
+	}
+	else if (camera_type == CAMERA_TIGER)
+	{
+		glViewport(0, 0, window_width, window_height);
+		set_ViewMatrix_for_tiger();
+		draw_objects_in_world();
+	}
+	else
+	{
+		if ((camera_driver_flag == 0) && (camera_tiger_flag == 0))
+		{
+			glViewport(0, 0, window_width, window_height);
+			set_ViewMatrix_for_world_viewer();
+			draw_objects_in_world();
+		}
+		else
+		{
+			glViewport(0, 0, window_width / 4 * 3, window_height);
+			set_ViewMatrix_for_world_viewer();
+			draw_objects_in_world();
+			if (camera_driver_flag)
+			{
+				glViewport(window_width / 4 * 3 + 1, 0, window_width / 4, window_height / 4);
+				set_ViewMatrix_for_driver();
+				draw_objects_in_world();
+			}
+			if (camera_tiger_flag)
+			{
+				glViewport(window_width / 4 * 3 + 1, window_height / 2, window_width / 4, window_height / 4);
+				set_ViewMatrix_for_tiger();
+				draw_objects_in_world();
+			}
+		}
+	}
+	glFlush();
+	glutSwapBuffers();
+}
+
+void arrow_inputhandler(int key, int x, int y)
+{
+	if (key == GLUT_KEY_LEFT)
+	{
+		cur_cam_height = 0;
+		cur_cam_pos += 11;
+		cur_cam_pos %= 12;
+		ViewMatrix = glm::lookAt(glm::vec3(CAM_DISTANCE*sin(TO_RADIAN*(cur_cam_pos * CAM_ROTATE)), 10.0f, CAM_DISTANCE*cos(TO_RADIAN*(cur_cam_pos * CAM_ROTATE))), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		camera_wv.uaxis = glm::vec3(ViewMatrix[0].x, ViewMatrix[1].x, ViewMatrix[2].x);
+		camera_wv.vaxis = glm::vec3(ViewMatrix[0].y, ViewMatrix[1].y, ViewMatrix[2].y);
+		camera_wv.naxis = glm::vec3(ViewMatrix[0].z, ViewMatrix[1].z, ViewMatrix[2].z);
+		camera_wv.pos = -(ViewMatrix[3].x*camera_wv.uaxis + ViewMatrix[3].y*camera_wv.vaxis + ViewMatrix[3].z*camera_wv.naxis);
+
+		camera_wv.move = 0;
+		camera_wv.fovy = 30.0f, camera_wv.aspect_ratio = 1.0f; camera_wv.near_c = 5.0f; camera_wv.far_c = 10000.0f;
+
+		ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+		glutPostRedisplay();
+	}
+	else if (key == GLUT_KEY_RIGHT)
+	{
+		cur_cam_height = 0;
+		cur_cam_pos += 1;
+		cur_cam_pos %= 12;
+		ViewMatrix = glm::lookAt(glm::vec3(CAM_DISTANCE*sin(TO_RADIAN*(cur_cam_pos * CAM_ROTATE)), 10.0f, CAM_DISTANCE*cos(TO_RADIAN*(cur_cam_pos * CAM_ROTATE))), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		camera_wv.uaxis = glm::vec3(ViewMatrix[0].x, ViewMatrix[1].x, ViewMatrix[2].x);
+		camera_wv.vaxis = glm::vec3(ViewMatrix[0].y, ViewMatrix[1].y, ViewMatrix[2].y);
+		camera_wv.naxis = glm::vec3(ViewMatrix[0].z, ViewMatrix[1].z, ViewMatrix[2].z);
+		camera_wv.pos = -(ViewMatrix[3].x*camera_wv.uaxis + ViewMatrix[3].y*camera_wv.vaxis + ViewMatrix[3].z*camera_wv.naxis);
+
+		camera_wv.move = 0;
+		camera_wv.fovy = 30.0f, camera_wv.aspect_ratio = 1.0f; camera_wv.near_c = 5.0f; camera_wv.far_c = 10000.0f;
+
+		ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+		glutPostRedisplay();
+	}
+	else if (key == GLUT_KEY_DOWN)
+	{
+		if (cur_cam_height == -1)
+		{
+			return;
+		}
+		cur_cam_height -= 1;
+		if (cur_cam_height == 0)
+		{
+			cur_cam_pos = 0;
+			ViewMatrix = glm::lookAt(glm::vec3(CAM_DISTANCE*sin(TO_RADIAN*(cur_cam_pos * CAM_ROTATE)), 10.0f, CAM_DISTANCE*cos(TO_RADIAN*(cur_cam_pos * CAM_ROTATE))), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		}
+		else if(cur_cam_height == -1)
+		{
+			cur_cam_pos = 0;
+			ViewMatrix = glm::lookAt(glm::vec3(0.0f, -CAM_DISTANCE, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		}
+		
+		camera_wv.uaxis = glm::vec3(ViewMatrix[0].x, ViewMatrix[1].x, ViewMatrix[2].x);
+		camera_wv.vaxis = glm::vec3(ViewMatrix[0].y, ViewMatrix[1].y, ViewMatrix[2].y);
+		camera_wv.naxis = glm::vec3(ViewMatrix[0].z, ViewMatrix[1].z, ViewMatrix[2].z);
+		camera_wv.pos = -(ViewMatrix[3].x*camera_wv.uaxis + ViewMatrix[3].y*camera_wv.vaxis + ViewMatrix[3].z*camera_wv.naxis);
+
+		camera_wv.move = 0;
+		camera_wv.fovy = 30.0f, camera_wv.aspect_ratio = 1.0f; camera_wv.near_c = 5.0f; camera_wv.far_c = 10000.0f;
+
+		ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+		glutPostRedisplay();
+	}
+	else if (key == GLUT_KEY_UP)
+	{
+		if (cur_cam_height == 1)
+		{
+			return;
+		}
+		cur_cam_height += 1;
+		if (cur_cam_height == 0)
+		{
+			ViewMatrix = glm::lookAt(glm::vec3(CAM_DISTANCE*sin(TO_RADIAN*(cur_cam_pos * CAM_ROTATE)), 10.0f, CAM_DISTANCE*cos(TO_RADIAN*(cur_cam_pos * CAM_ROTATE))), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		}
+		else if (cur_cam_height == 1)
+		{
+			cur_cam_pos = 0;
+			ViewMatrix = glm::lookAt(glm::vec3(0.0f, CAM_DISTANCE, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+		}
+
+		camera_wv.uaxis = glm::vec3(ViewMatrix[0].x, ViewMatrix[1].x, ViewMatrix[2].x);
+		camera_wv.vaxis = glm::vec3(ViewMatrix[0].y, ViewMatrix[1].y, ViewMatrix[2].y);
+		camera_wv.naxis = glm::vec3(ViewMatrix[0].z, ViewMatrix[1].z, ViewMatrix[2].z);
+		camera_wv.pos = -(ViewMatrix[3].x*camera_wv.uaxis + ViewMatrix[3].y*camera_wv.vaxis + ViewMatrix[3].z*camera_wv.naxis);
+
+		camera_wv.move = 0;
+		camera_wv.fovy = 30.0f, camera_wv.aspect_ratio = 1.0f; camera_wv.near_c = 5.0f; camera_wv.far_c = 10000.0f;
+
+		ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+		glutPostRedisplay();
+	}
+}
+
+void keyboard(unsigned char key, int x, int y) {
+	switch (key) {
+	case 'r':
+		camera_type = CAMERA_DRIVER;
+		camera_driver_flag = 0;
+		camera_tiger_flag = 0;
+		glutPostRedisplay();
+		break;
+	case 'g':
+		camera_type = CAMERA_TIGER;
+		camera_driver_flag = 0;
+		camera_tiger_flag = 0;
+		glutPostRedisplay();
+		break;
+	case 'f':
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		glutPostRedisplay();
+		break;
+	case 'l':
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		glutPostRedisplay();
+		break;
+	case 'd':
+		ViewMatrix = glm::mat4(1.0f);
+		if (camera_driver_flag)
+		{
+			camera_driver_flag = 0;
+		}
+		else
+		{
+			camera_driver_flag = 1;
+		}
+		printf(" driver : %d\n tiger : %d\n",camera_driver_flag,camera_tiger_flag);
+		glutPostRedisplay();
+		break;
+	case 't':
+		ViewMatrix = glm::mat4(1.0f);
+		if (camera_tiger_flag)
+		{
+			camera_tiger_flag = 0;
+		}
+		else
+		{
+			camera_tiger_flag = 1;
+		}
+		printf(" driver : %d\n tiger : %d\n", camera_driver_flag, camera_tiger_flag);
+		glutPostRedisplay();
+		break;
+	case 'w':
+		ViewMatrix = glm::mat4(1.0f);
+		camera_type = CAMERA_WORLD_VIEWER;
+		camera_driver_flag = 0;
+		camera_tiger_flag = 0;
+		set_ViewMatrix_for_world_viewer();
+		ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+		printf(" driver : %d\n tiger : %d\n", camera_driver_flag, camera_tiger_flag);
+		glutPostRedisplay();
+		break;
+	case 'o':
+		flag_draw_world_objects = 1 - flag_draw_world_objects;
+		glutPostRedisplay();
+		break;
+	case 'p':
+		switch_teapot();
+		glutPostRedisplay();
+		break;
+	case 'b':
+		switch_box();
+		glutPostRedisplay();
+		break;
+	case 'c':
+		switch_tigermoving();
+		glutPostRedisplay();
+		break;
+	case 27: // ESC key
+		glutLeaveMainLoop(); // Incur destuction callback for cleanups.
+		break;
+	}
+}
+
+int prevx, prevy;
+
+void motion(int x, int y) {
+	bool shift_press = glutGetModifiers();
+	if (!camera_wv.move ) 
+		return;
+
+	if (shift_press == GLUT_ACTIVE_SHIFT)
+	{
+		renew_cam_position(prevx - x);
+	}
+	/*else
+	{
+		renew_cam_position(prevy - y);
+		renew_cam_orientation_rotation_around_v_axis(prevx - x);
+	}*/
+
+	prevx = x; prevy = y;
+	if (camera_type != CAMERA_WORLD_VIEWER)
+		return;
+	set_ViewMatrix_for_world_viewer();
+	ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+
+	glutPostRedisplay();
+}
+
+void mouse(int button, int state, int x, int y) {
+	if ((button == GLUT_LEFT_BUTTON)) {
+		if (state == GLUT_DOWN) {
+			camera_wv.move = 1; 
+			prevx = x;
+			prevy = y;
+		}
+		else if (state == GLUT_UP) camera_wv.move = 0;
+	}
+}
+
+void reshape(int width, int height) {
+	glViewport(0, 0, width, height);
+	
+	window_width = width;
+	window_height = height;
+
+	camera_wv.aspect_ratio = (float)width / height;
+	camera_dv.aspect_ratio = (float)width / height;
+	camera_tv.aspect_ratio = (float)width / height;
+
+	ProjectionMatrix = glm::perspective(TO_RADIAN*camera_wv.fovy, camera_wv.aspect_ratio, camera_wv.near_c, camera_wv.far_c);
+	ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+
+	glutPostRedisplay();
+}
+
+void timer_scene(int timestamp_scene) {
+	rotation_angle_car = (timestamp_scene % 360)*TO_RADIAN;
+	cur_frame_spider = timestamp_scene % N_SPIDER_FRAMES;
+	cur_frame_tiger = timestamp_scene/10 % N_TIGER_FRAMES;
+	glutPostRedisplay();
+	glutTimerFunc(10, timer_scene, (timestamp_scene + 1) % INT_MAX);
+}
+
+void cleanup(void) {
+	free_axes();
+	free_path();
+
+	free_geom_obj(GEOM_OBJ_ID_CAR_BODY);
+	free_geom_obj(GEOM_OBJ_ID_CAR_WHEEL);
+	free_geom_obj(GEOM_OBJ_ID_CAR_NUT);
+	free_geom_obj(GEOM_OBJ_ID_CAR_BODY);
+	free_geom_obj(GEOM_OBJ_ID_COW);
+	free_geom_obj(GEOM_OBJ_ID_TEAPOT);
+	free_geom_obj(GEOM_OBJ_ID_BOX);
+
+	//------------------------------
+	free_geom_obj(GEOM_OBJ_ID_DRAGON);
+	free_geom_obj(GEOM_OBJ_ID_IRONMAN);
+
+
+	glDeleteVertexArrays(1, &spider_VAO);
+	glDeleteBuffers(1, &spider_VBO);
+	glDeleteVertexArrays(1, &tiger_VBO);
+	glDeleteBuffers(1, &tiger_VBO);
+}
+/*********************************  END: callbacks *********************************/
+
+void register_callbacks(void) {
+	glutDisplayFunc(display);
+	glutKeyboardFunc(keyboard);
+	glutMouseFunc(mouse);
+	glutMotionFunc(motion);
+	glutReshapeFunc(reshape);
+	glutTimerFunc(100, timer_scene, 0);
+	glutCloseFunc(cleanup);
+	glutSpecialFunc(arrow_inputhandler);
+}
+
+void prepare_shader_program(void) {
+	ShaderInfo shader_info[3] = {
+		{ GL_VERTEX_SHADER, "Shaders/simple.vert" },
+		{ GL_FRAGMENT_SHADER, "Shaders/simple.frag" },
+		{ GL_NONE, NULL }
+	};
+
+	h_ShaderProgram = LoadShaders(shader_info);
+	glUseProgram(h_ShaderProgram);
+
+	loc_ModelViewProjectionMatrix = glGetUniformLocation(h_ShaderProgram, "u_ModelViewProjectionMatrix");
+	loc_primitive_color = glGetUniformLocation(h_ShaderProgram, "u_primitive_color");
+}
+
+void initialize_OpenGL(void) {
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	glEnable(GL_DEPTH_TEST);
+
+	glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+
+	ViewMatrix = glm::mat4(1.0f);
+	ProjectionMatrix = glm::mat4(1.0f);
+	ViewProjectionMatrix = ProjectionMatrix * ViewMatrix; 
+
+	ModelMatrix_TIGER = glm::mat4(1.0f);
+	ModelMatrix_CAR_BODY = glm::mat4(1.0f);
+	ModelMatrix_CAR_WHEEL = glm::mat4(1.0f);
+	ModelMatrix_CAR_NUT = glm::mat4(1.0f);
+	ModelMatrix_TEAPOT = glm::mat4(1.0f);
+	ModelMatrix_BOX = glm::mat4(1.0f);
+}
+
+void prepare_scene(void) {
+	prepare_axes(); 
+	prepare_path();
+	prepare_web();
+	prepare_geom_obj(GEOM_OBJ_ID_CAR_BODY, "Data/car_body_triangles_v.txt", GEOM_OBJ_TYPE_V);
+	prepare_geom_obj(GEOM_OBJ_ID_CAR_WHEEL, "Data/car_wheel_triangles_v.txt", GEOM_OBJ_TYPE_V);
+	prepare_geom_obj(GEOM_OBJ_ID_CAR_NUT, "Data/car_nut_triangles_v.txt", GEOM_OBJ_TYPE_V);
+	prepare_geom_obj(GEOM_OBJ_ID_COW, "Data/cow_triangles_v.txt", GEOM_OBJ_TYPE_V);
+	prepare_geom_obj(GEOM_OBJ_ID_TEAPOT, "Data/teapot_triangles_v.txt", GEOM_OBJ_TYPE_V);
+	prepare_geom_obj(GEOM_OBJ_ID_BOX, "Data/box_triangles_v.txt", GEOM_OBJ_TYPE_V);
+	prepare_spider();
+	prepare_tiger();
+
+	prepare_dragon();
+	prepare_ironman();
+
+}
+
+void initialize_renderer(void) {
+	register_callbacks();
+	prepare_shader_program();
+	initialize_OpenGL();
+	prepare_scene();
+	initialize_camera();
+}
+
+void initialize_glew(void) {
+	GLenum error;
+
+	glewExperimental = GL_TRUE;
+
+	error = glewInit();
+	if (error != GLEW_OK) {
+		fprintf(stderr, "Error: %s\n", glewGetErrorString(error));
+		exit(-1);
+	}
+	fprintf(stdout, "*********************************************************\n");
+	fprintf(stdout, " - GLEW version supported: %s\n", glewGetString(GLEW_VERSION));
+	fprintf(stdout, " - OpenGL renderer: %s\n", glGetString(GL_RENDERER));
+	fprintf(stdout, " - OpenGL version supported: %s\n", glGetString(GL_VERSION));
+	fprintf(stdout, "*********************************************************\n\n");
+}
+
+void print_message(const char * m) {
+	fprintf(stdout, "%s\n\n", m);
+}
+
+void greetings(char *program_name, char messages[][256], int n_message_lines) {
+	fprintf(stdout, "**************************************************************\n\n");
+	fprintf(stdout, "  PROGRAM NAME: %s\n\n", program_name);
+	fprintf(stdout, "    This program was coded for CSE4170 students\n");
+	fprintf(stdout, "      of Dept. of Comp. Sci. & Eng., Sogang University.\n\n");
+
+	for (int i = 0; i < n_message_lines; i++)
+		fprintf(stdout, "%s\n", messages[i]);
+	fprintf(stdout, "\n**************************************************************\n\n");
+
+	initialize_glew();
+}
+
+#define N_MESSAGE_LINES 2
+void main(int argc, char *argv[]) {
+	char program_name[64] = "Sogang CSE4170 4.7.1.Hier_Car_Dummy_Driver_GLSL";
+	char messages[N_MESSAGE_LINES][256] = { "    - Keys used: 'f', l', 'd', 'w', 'o', 'ESC'",
+											"    - Mouse used: L-Click and move" };
+
+	glutInit(&argc, argv);
+	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH);
+	glutInitWindowSize(1200, 800);
+	glutInitContextVersion(3, 3);
+	glutInitContextProfile(GLUT_CORE_PROFILE);
+	glutCreateWindow(program_name);
+
+	greetings(program_name, messages, N_MESSAGE_LINES);
+	initialize_renderer();
+
+	glutMainLoop();
+}
